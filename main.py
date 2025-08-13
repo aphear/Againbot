@@ -1,8 +1,11 @@
+#!/usr/bin/env python3
+import os
+import sys
 import logging
 import asyncio
-import requests
 import sqlite3
-import os
+import requests
+from pathlib import Path
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.enums import ParseMode
@@ -12,6 +15,7 @@ from aiohttp import web
 from requests.exceptions import RequestException
 
 # ===== CONFIGURATION =====
+# Get environment variables with fallback values
 API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8074812211:AAERuRkWTtrJf04--d9SXo-aE8aAukox3mg")
 IMG_BB_API = os.getenv("IMG_BB_API_KEY", "c4b5c48ed3e11d9dac49d07c62b2b595")
 ADMIN_ID = os.getenv("ADMIN_TELEGRAM_ID", "6042559774")
@@ -25,28 +29,48 @@ CHANNELS = [
     "@iconictraders69"
 ]
 
+# ===== INITIALIZATION =====
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Ensure data directory exists
+Path("data").mkdir(exist_ok=True)
+DATABASE_PATH = "data/bot_data.db"
+
 # ===== DATABASE SETUP =====
 def init_db():
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users
-                      (user_id INTEGER PRIMARY KEY, 
-                       username TEXT,
-                       first_name TEXT,
-                       last_name TEXT,
-                       join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''CREATE TABLE IF NOT EXISTS users
+                          (user_id INTEGER PRIMARY KEY, 
+                           username TEXT,
+                           first_name TEXT,
+                           last_name TEXT,
+                           join_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.commit()
+        conn.close()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        raise
 
 init_db()
 
-# ===== INITIALIZE BOT =====
+# ===== BOT SETUP =====
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
 # ===== WEB SERVER SETUP =====
 async def handle_health_check(request):
-    return web.Response(text="Bot is running!")
+    return web.Response(text="Bot is running and healthy!")
 
 async def start_web_server():
     app = web.Application()
@@ -55,16 +79,14 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 8080)
     await site.start()
+    logger.info("Web server started on port 8080")
     return site
 
 # ===== KEYBOARDS =====
 def channels_keyboard():
     builder = InlineKeyboardBuilder()
-    builder.button(text="Channel 1", url=f"https://t.me/{CHANNELS[0][1:]}")
-    builder.button(text="Channel 2", url=f"https://t.me/{CHANNELS[1][1:]}")
-    builder.button(text="Channel 3", url=f"https://t.me/{CHANNELS[2][1:]}")
-    builder.button(text="Channel 4", url=f"https://t.me/{CHANNELS[3][1:]}")
-    builder.button(text="Channel 5", url=f"https://t.me/{CHANNELS[4][1:]}")
+    for i, channel in enumerate(CHANNELS, 1):
+        builder.button(text=f"Channel {i}", url=f"https://t.me/{channel[1:]}")
     builder.button(text="✅ JOINED", callback_data="check_channels")
     builder.adjust(2, 2, 1)
     return builder.as_markup()
@@ -92,47 +114,58 @@ def admin_panel_keyboard():
     builder.adjust(2, 2, 1)
     return builder.as_markup()
 
-# ===== UTILITIES =====
+# ===== UTILITY FUNCTIONS =====
 async def save_user(user_id: int, username: str, first_name: str, last_name: str):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute('''INSERT OR IGNORE INTO users 
-                      (user_id, username, first_name, last_name) 
-                      VALUES (?, ?, ?, ?)''',
-                   (user_id, username, first_name, last_name))
-    conn.commit()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute('''INSERT OR IGNORE INTO users 
+                          (user_id, username, first_name, last_name) 
+                          VALUES (?, ?, ?, ?)''',
+                       (user_id, username, first_name, last_name))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error saving user: {e}")
 
 async def get_user_count():
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users")
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    except Exception as e:
+        logger.error(f"Error getting user count: {e}")
+        return 0
 
 async def broadcast_message(message_type: str, content, caption=None):
-    conn = sqlite3.connect('bot_data.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id FROM users")
-    users = cursor.fetchall()
-    conn.close()
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users")
+        users = cursor.fetchall()
+        conn.close()
 
-    success = 0
-    for user in users:
-        try:
-            if message_type == "text":
-                await bot.send_message(user[0], content)
-            elif message_type == "video":
-                await bot.send_video(user[0], video=content, caption=caption)
-            elif message_type == "voice":
-                await bot.send_voice(user[0], voice=content, caption=caption)
-            elif message_type == "sticker":
-                await bot.send_sticker(user[0], sticker=content)
-            success += 1
-        except Exception as e:
-            logging.error(f"Failed to send to {user[0]}: {e}")
-    return success
+        success = 0
+        for user in users:
+            try:
+                if message_type == "text":
+                    await bot.send_message(user[0], content)
+                elif message_type == "video":
+                    await bot.send_video(user[0], video=content, caption=caption)
+                elif message_type == "voice":
+                    await bot.send_voice(user[0], voice=content, caption=caption)
+                elif message_type == "sticker":
+                    await bot.send_sticker(user[0], sticker=content)
+                success += 1
+            except Exception as e:
+                logger.error(f"Failed to send to {user[0]}: {e}")
+        return success
+    except Exception as e:
+        logger.error(f"Broadcast error: {e}")
+        return 0
 
 def is_admin(user_id: int) -> bool:
     return str(user_id) == ADMIN_ID
@@ -144,25 +177,12 @@ async def check_user_joined(user_id: int):
             if member.status in ["left", "kicked"]:
                 return False
         except Exception as e:
-            logging.error(f"Error checking channel {channel}: {e}")
+            logger.error(f"Error checking channel {channel}: {e}")
             await bot.send_message(ADMIN_ID, f"⚠️ Channel check failed for {channel}: {e}")
             return False
     return True
 
-# ===== HANDLERS =====
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await save_user(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name,
-        message.from_user.last_name
-    )
-    if await check_user_joined(message.from_user.id):
-        await show_main_menu(message)
-    else:
-        await show_channel_requirement(message)
-
+# ===== MESSAGE HANDLERS =====
 async def show_channel_requirement(message: types.Message):
     try:
         await message.answer_photo(
@@ -171,7 +191,7 @@ async def show_channel_requirement(message: types.Message):
             reply_markup=channels_keyboard()
         )
     except Exception as e:
-        logging.error(f"Error sending join requirement: {e}")
+        logger.error(f"Error sending join requirement: {e}")
         await message.answer(
             "📌 নিচে দেওয়া সবগুলো চ্যানেলে জয়েন করে ( ✅ Joined ) বাটনে চাপ দিন ।",
             reply_markup=channels_keyboard()
@@ -188,11 +208,24 @@ async def show_main_menu(message: types.Message):
             reply_markup=main_menu_keyboard()
         )
     except Exception as e:
-        logging.error(f"Error sending welcome message: {e}")
+        logger.error(f"Error sending welcome message: {e}")
         await message.answer(
             "( Image To Url ) ব্যবহার হবে ছবি থেকে Url বাহির করার জন্য :",
             reply_markup=main_menu_keyboard()
         )
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await save_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name,
+        message.from_user.last_name
+    )
+    if await check_user_joined(message.from_user.id):
+        await show_main_menu(message)
+    else:
+        await show_channel_requirement(message)
 
 @dp.callback_query(lambda c: c.data == "check_channels")
 async def check_channels(callback: types.CallbackQuery):
@@ -214,7 +247,7 @@ async def request_image(message: types.Message):
                    "⬇️ <b>SEND YOUR IMAGE NOW</b> ⬇️"
         )
     except Exception as e:
-        logging.error(f"Error sending instructions: {e}")
+        logger.error(f"Error sending instructions: {e}")
         await message.answer(
             "📤 <b>( Image Url ) এর জন্য ছবি পাঠান:</b>\n\n"
             "1. <b>📎 ক্লিপ আইকন এর উপর চাপ দিন</b> \n"
@@ -257,13 +290,13 @@ async def process_image(message: types.Message):
 
     except Exception as e:
         error_msg = f"Error processing image: {e}"
-        logging.error(error_msg)
+        logger.error(error_msg)
         if processing_msg:
             await processing_msg.edit_text("❌ <b>ERROR PROCESSING IMAGE</b>")
         else:
             await message.reply("❌ <b>ERROR PROCESSING IMAGE</b>")
 
-# ===== ADMIN PANEL HANDLERS =====
+# ===== ADMIN HANDLERS =====
 @dp.message(Command("adminpanel"))
 async def admin_panel_command(message: types.Message):
     if not is_admin(message.from_user.id):
@@ -321,17 +354,25 @@ async def handle_broadcast_content(message: types.Message):
     finally:
         del dp.broadcast_type
 
-# ===== MAIN =====
+# ===== MAIN FUNCTION =====
 async def main():
-    # Start web server
-    await start_web_server()
-    
-    # Start bot
-    await dp.start_polling(bot)
+    try:
+        logger.info("Starting application...")
+        
+        # Start web server
+        await start_web_server()
+        
+        # Start bot
+        logger.info("Starting bot polling...")
+        await dp.start_polling(bot)
+        
+    except Exception as e:
+        logger.error(f"Application failed: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+        sys.exit(0)
